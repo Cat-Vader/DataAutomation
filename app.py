@@ -3,41 +3,46 @@ import pandas as pd
 from io import BytesIO
 import time  # For progress bar simulation
 
-# Function to process each supermarket and update ITEMMASTER
-def process_supermarket_data(supermarket_df, itemmaster_df, unique_identifier, desc_column, barcode_column=None, brand_column=None):
-    new_entries = []
+# Function to enrich supermarket data and update ITEMMASTER
+def process_and_enrich_data(supermarket_df, itemmaster_df, unique_identifier, desc_column, barcode_column=None):
+    new_entries = []  # List to collect new entries for ITEMMASTER
+
+    # Iterate over supermarket data
     for idx, row in supermarket_df.iterrows():
         unique_id = row.get(unique_identifier)
-        description = row.get(desc_column)
         barcode = row.get(barcode_column) if barcode_column else None
-        brand = row.get(brand_column) if brand_column else None
-        if unique_id not in itemmaster_df['prodcode'].values:
-            if barcode is None or barcode not in itemmaster_df['Barcode(WITH GEN)'].values:
-                new_entry = {
-                    'prodcode': unique_id,
-                    'DESC': description,
-                    'Barcode(WITH GEN)': barcode,
-                    'Brand': brand
-                }
-                new_entries.append(new_entry)
+
+        # Check if the unique identifier or barcode exists in ITEMMASTER
+        matched_row = itemmaster_df[(itemmaster_df['prodcode'] == unique_id) | 
+                                    (itemmaster_df['Barcode(WITH GEN)'] == barcode)]
+
+        if not matched_row.empty:
+            # Match found in ITEMMASTER - enrich supermarket data with ITEMMASTER details
+            for col in itemmaster_df.columns:
+                if col in supermarket_df.columns:
+                    supermarket_df.at[idx, col] = matched_row.iloc[0][col]
+                else:
+                    supermarket_df[col] = matched_row.iloc[0][col]  # Add column if missing in supermarket data
+        else:
+            # No match found - add this as a new entry for ITEMMASTER
+            new_entry = {
+                'prodcode': unique_id,
+                'DESC': row.get(desc_column),
+                'Barcode(WITH GEN)': barcode,
+                'Brand': row.get('Brand', None)  # Include any available details
+            }
+            new_entries.append(new_entry)
+
+    # Append new entries to ITEMMASTER
     if new_entries:
         new_entries_df = pd.DataFrame(new_entries)
         itemmaster_df = pd.concat([itemmaster_df, new_entries_df], ignore_index=True)
-    return itemmaster_df
+
+    return itemmaster_df, supermarket_df
 
 def remove_duplicates(itemmaster_df):
+    # Remove duplicates from ITEMMASTER based on 'prodcode' and 'Barcode(WITH GEN)'
     itemmaster_df.drop_duplicates(subset=['prodcode', 'Barcode(WITH GEN)'], keep='first', inplace=True)
-    return itemmaster_df
-
-def complete_missing_fields(itemmaster_df, supermarket_df):
-    for idx, row in supermarket_df.iterrows():
-        unique_id = row.get('Itemid') or row.get('ITEM_CODE') or row.get('Item Code') or row.get('SKU') or row.get('Barcode')
-        if pd.notna(unique_id):
-            mask = (itemmaster_df['prodcode'] == unique_id) | (itemmaster_df['Barcode(WITH GEN)'] == row.get('Barcode'))
-            if mask.any():
-                itemmaster_idx = itemmaster_df.index[mask][0]
-                if pd.isna(itemmaster_df.at[itemmaster_idx, 'Brand']) and row.get('Brand'):
-                    itemmaster_df.at[itemmaster_idx, 'Brand'] = row.get('Brand')
     return itemmaster_df
 
 # Streamlit App
@@ -84,71 +89,60 @@ if start_processing and supermarket_file and itemmaster_df is not None:
         supermarket_df = pd.read_excel(supermarket_file)
         st.write(f"{supermarket_name} data loaded successfully")
 
-        # Processing data based on the selected supermarket
+        # Map supermarket-specific columns and process data
         if supermarket_name == "Naivas":
-            itemmaster_df = process_supermarket_data(supermarket_df, itemmaster_df, unique_identifier='Itemid', desc_column='Itemname')
+            itemmaster_df, supermarket_df = process_and_enrich_data(supermarket_df, itemmaster_df, unique_identifier='Itemid', desc_column='Itemname')
         elif supermarket_name == "Quickmatt":
-            itemmaster_df = process_supermarket_data(supermarket_df, itemmaster_df, unique_identifier='ITEM_CODE', desc_column='ITEM_NAME', barcode_column='BARCODE')
+            itemmaster_df, supermarket_df = process_and_enrich_data(supermarket_df, itemmaster_df, unique_identifier='ITEM_CODE', desc_column='ITEM_NAME', barcode_column='BARCODE')
         elif supermarket_name == "Carrefour":
-            itemmaster_df = process_supermarket_data(supermarket_df, itemmaster_df, unique_identifier='Item Code', desc_column='Item Name', barcode_column='Item Bar Code')
+            itemmaster_df, supermarket_df = process_and_enrich_data(supermarket_df, itemmaster_df, unique_identifier='Item Code', desc_column='Item Name', barcode_column='Item Bar Code')
         elif supermarket_name == "Magunas":
+            # Custom handling for Magunas' SKU description split
             for idx, row in supermarket_df.iterrows():
                 sku_description = row.get('SKU-DESCRIPTION')
                 if pd.notna(sku_description):
                     item_code, *description_parts = sku_description.split('-')
                     item_code = item_code.strip()
                     description = '-'.join(description_parts).strip()
-                    if item_code not in itemmaster_df['prodcode'].values:
-                        new_entry = {
-                            'prodcode': item_code,
-                            'DESC': description,
-                            'Barcode(WITH GEN)': None,
-                            'Brand': None
-                        }
-                        new_entries = [new_entry]
-                        new_entries_df = pd.DataFrame(new_entries)
-                        itemmaster_df = pd.concat([itemmaster_df, new_entries_df], ignore_index=True)
+                    supermarket_df.at[idx, 'Itemid'] = item_code
+                    supermarket_df.at[idx, 'Itemname'] = description
+            itemmaster_df, supermarket_df = process_and_enrich_data(supermarket_df, itemmaster_df, unique_identifier='Itemid', desc_column='Itemname')
         elif supermarket_name == "Chandarana":
-            for idx, row in supermarket_df.iterrows():
-                item_name = row.get('Item Name')
-                barcode = row.get('Barcode')
-                if barcode not in itemmaster_df['Barcode(WITH GEN)'].values:
-                    new_entry = {
-                        'prodcode': None,
-                        'DESC': item_name,
-                        'Barcode(WITH GEN)': barcode,
-                        'Brand': None
-                    }
-                    new_entries = [new_entry]
-                    new_entries_df = pd.DataFrame(new_entries)
-                    itemmaster_df = pd.concat([itemmaster_df, new_entries_df], ignore_index=True)
+            itemmaster_df, supermarket_df = process_and_enrich_data(supermarket_df, itemmaster_df, unique_identifier='Item Name', desc_column='Item Name', barcode_column='Barcode')
 
-        # Remove duplicates
+        # Remove duplicates in ITEMMASTER after adding new entries
         itemmaster_df = remove_duplicates(itemmaster_df)
-        progress_bar.progress(50)  # Update progress bar
-
-        # Complete missing fields if necessary
-        itemmaster_df = complete_missing_fields(itemmaster_df, supermarket_df)
-        progress_bar.progress(100)  # Update progress bar
+        progress_bar.progress(100)  # Complete the progress bar
 
         # Update session with the latest ITEMMASTER
         st.session_state.itemmaster_df = itemmaster_df
         st.success("Processing complete!")
 
-        # Display processed ITEMMASTER and download option
+        # Display processed ITEMMASTER and supermarket data with enriched details
         st.write("Processed ITEMMASTER Data")
         st.dataframe(itemmaster_df)
+        
+        st.write(f"Enriched {supermarket_name} Data")
+        st.dataframe(supermarket_df)
 
-        # Create an in-memory bytes buffer for the Excel file
+        # Download options for ITEMMASTER and enriched supermarket data
         buffer = BytesIO()
         with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-            st.session_state.itemmaster_df.to_excel(writer, index=False, sheet_name='Updated ITEMMASTER')
-        
-        # Download processed ITEMMASTER
+            itemmaster_df.to_excel(writer, index=False, sheet_name='Updated ITEMMASTER')
         st.download_button(
             label="Download Processed ITEMMASTER",
             data=buffer.getvalue(),
             file_name="processed_itemmaster.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+        supermarket_buffer = BytesIO()
+        with pd.ExcelWriter(supermarket_buffer, engine='xlsxwriter') as writer:
+            supermarket_df.to_excel(writer, index=False, sheet_name=f'Enriched {supermarket_name}')
+        st.download_button(
+            label=f"Download Enriched {supermarket_name} Data",
+            data=supermarket_buffer.getvalue(),
+            file_name=f"enriched_{supermarket_name.lower()}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 else:
